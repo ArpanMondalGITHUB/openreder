@@ -1,0 +1,1 @@
+A universal listening layer: select anything on your computer and instantly turn it into a continuous, high-quality audio stream.
