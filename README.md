@@ -13,6 +13,9 @@ OpenReader lets you select text in any Windows app and read it aloud with a sync
 - Optional OpenRouter cloud text-to-speech.
 - Floating overlay that shows the current spoken line.
 
+  <img width="1536" height="1024" alt="ChatGPT Image Sep 1, 2026, 10_21_31 PM" src="https://github.com/user-attachments/assets/c295b6b4-aa83-4c8c-9d88-1d03a2006667" />
+
+
 ## Requirements
 
 - Windows 10 or 11.
