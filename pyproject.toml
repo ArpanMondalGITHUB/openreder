@@ -6,8 +6,10 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "keyboard>=0.13.5",
+    "pygame>=2.6.1",
     "pyperclip>=1.11.0",
     "pyttsx3>=2.99",
     "pywin32>=312",
+    "requests>=2.34.2",
     "uiautomation>=2.0.29",
 ]

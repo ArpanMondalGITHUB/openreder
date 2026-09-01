@@ -1,0 +1,7 @@
+keyboard
+pygame
+pyperclip
+pyttsx3
+pywin32
+requests
+uiautomation
