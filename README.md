@@ -1,5 +1,8 @@
 # OpenReader
 
+<img width="1254" height="1254" alt="ChatGPT Image Sep 1, 2026, 10_26_25 PM-compressed" src="https://github.com/user-attachments/assets/6d554fc1-5841-4dfa-80cb-da8097437e9a" />
+
+
 OpenReader lets you select text in any Windows app and read it aloud with a synced floating highlight overlay.
 
 ## Features
