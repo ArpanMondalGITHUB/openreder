@@ -1,24 +1,51 @@
-"""
-Windows System-Wide Text-to-Speech Reader (with synced line-highlight overlay)
---------------------------------------------------------------------------------
-Select text in ANY app -> press Ctrl+Alt -> a floating panel shows the text
-and highlights the line currently being spoken, in sync with the audio —
-like karaoke/lyrics highlighting. Press Ctrl+Alt again while speaking to stop.
-
-Install: pip install keyboard pyperclip pyttsx3 pywin32
-(tkinter, used for the overlay, ships with Python already — no extra install)
-
-Run from an elevated/admin terminal: python hotkey.py
-"""
-
 import ctypes
+import json
+import os
+import tempfile
 import keyboard
 import pyperclip
+import pygame
 import pyttsx3
+import requests
 import threading
 import time
 import tkinter as tk
 import uiautomation as auto
+
+
+# ---------------------------------------------------------------------------
+# CONFIG
+# A plain JSON file next to the script, so you can switch between the local
+# offline engine and the cloud OpenRouter engine (and set your API key and
+# voice) without editing code — just edit config.json and rerun.
+# ---------------------------------------------------------------------------
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+
+DEFAULT_CONFIG = {
+    "engine": "local",              # "local" (pyttsx3/SAPI5, offline) or "openrouter" (cloud)
+    "openrouter_api_key": "",       # get one free at https://openrouter.ai/keys
+    "openrouter_voice": "flux-haley-en"   # see https://developers.deepgram.com/docs/flux-tts/voices
+}
+
+
+def load_config():
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return {**DEFAULT_CONFIG, **data}   # fill in any missing keys with defaults
+        except json.JSONDecodeError as e:
+            # A typo in a hand-edited config.json used to crash the whole
+            # app before it even started. Fall back to defaults instead, so
+            # local mode always still works even if the file is broken.
+            return dict(DEFAULT_CONFIG)
+    with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+        json.dump(DEFAULT_CONFIG, f, indent=2)
+    return dict(DEFAULT_CONFIG)
+
+
+config = load_config()
+pygame.mixer.init()   # needed for playing cloud-generated audio files
 
 
 # ---------------------------------------------------------------------------
@@ -42,64 +69,61 @@ def get_selection_text_range():
             return None
         return selections[0]
     except Exception as e:
-        print(f"[debug] exception in get_selection_text_range: {e}")
         return None
 
 
-def get_rect_for_offset_range(full_range, start_offset, end_offset):
-    """Given the FULL selection's TextRange, carve out the sub-range for
-    characters [start_offset, end_offset) of our copied text and return its
-    on-screen bounding box — this is what lets the highlight move to a
-    specific line instead of covering the whole selection."""
-    try:
-        sub_range = full_range.Clone()
-        # Collapse the clone to exactly the selection's own start point
-        # (an exact position match, not a unit-based move) so the character
-        # offsets below are relative to OUR text, not the whole document.
-        sub_range.MoveEndpointByRange(
-            auto.TextPatternRangeEndpoint.End, sub_range, auto.TextPatternRangeEndpoint.Start
-        )
-        sub_range.MoveEndpointByUnit(auto.TextPatternRangeEndpoint.Start, auto.TextUnit.Character, start_offset)
-        sub_range.MoveEndpointByUnit(auto.TextPatternRangeEndpoint.End, auto.TextUnit.Character, end_offset)
+# def get_rect_for_offset_range(full_range, start_offset, end_offset):
+#     """Given the FULL selection's TextRange, carve out the sub-range for
+#     characters [start_offset, end_offset) of our copied text and return its
+#     on-screen bounding box — this is what lets the highlight move to a
+#     specific line instead of covering the whole selection."""
+#     try:
+#         sub_range = full_range.Clone()
+#         # Collapse the clone to exactly the selection's own start point
+#         # (an exact position match, not a unit-based move) so the character
+#         # offsets below are relative to OUR text, not the whole document.
+#         sub_range.MoveEndpointByRange(
+#             auto.TextPatternRangeEndpoint.End, sub_range, auto.TextPatternRangeEndpoint.Start
+#         )
+#         sub_range.MoveEndpointByUnit(auto.TextPatternRangeEndpoint.Start, auto.TextUnit.Character, start_offset)
+#         sub_range.MoveEndpointByUnit(auto.TextPatternRangeEndpoint.End, auto.TextUnit.Character, end_offset)
 
-        rects = sub_range.GetBoundingRectangles()
-        if not rects:
-            return None
-        lefts = [r.left for r in rects]
-        tops = [r.top for r in rects]
-        rights = [r.right for r in rects]
-        bottoms = [r.bottom for r in rects]
-        return (min(lefts), min(tops), max(rights), max(bottoms))
-    except Exception as e:
-        print(f"[debug] exception in get_rect_for_offset_range: {e}")
-        return None
+#         rects = sub_range.GetBoundingRectangles()
+#         if not rects:
+#             return None
+#         lefts = [r.left for r in rects]
+#         tops = [r.top for r in rects]
+#         rights = [r.right for r in rects]
+#         bottoms = [r.bottom for r in rects]
+#         return (min(lefts), min(tops), max(rights), max(bottoms))
+#     except Exception as e:
+#         return None
 
 
-def get_selection_bounding_rect():
-    """Returns (left, top, right, bottom) in screen coords, or None if the
-    focused app doesn't expose a usable text selection via UI Automation."""
-    try:
-        focused = auto.GetFocusedControl()
-        text_pattern = focused.GetTextPattern()
-        if not text_pattern:
-            return None
-        selections = text_pattern.GetSelection()
-        if not selections:
-            return None
-        # GetBoundingRectangles returns a list of Rect objects — one per
-        # visual line the selection spans, since a wrapped selection isn't
-        # a single rectangle. Combine them into one overall bounding box.
-        rects = selections[0].GetBoundingRectangles()
-        if not rects:
-            return None
-        lefts = [r.left for r in rects]
-        tops = [r.top for r in rects]
-        rights = [r.right for r in rects]
-        bottoms = [r.bottom for r in rects]
-        return (min(lefts), min(tops), max(rights), max(bottoms))
-    except Exception as e:
-        print(f"[debug] exception in get_selection_bounding_rect: {e}")
-        return None
+# def get_selection_bounding_rect():
+#     """Returns (left, top, right, bottom) in screen coords, or None if the
+#     focused app doesn't expose a usable text selection via UI Automation."""
+#     try:
+#         focused = auto.GetFocusedControl()
+#         text_pattern = focused.GetTextPattern()
+#         if not text_pattern:
+#             return None
+#         selections = text_pattern.GetSelection()
+#         if not selections:
+#             return None
+#         # GetBoundingRectangles returns a list of Rect objects — one per
+#         # visual line the selection spans, since a wrapped selection isn't
+#         # a single rectangle. Combine them into one overall bounding box.
+#         rects = selections[0].GetBoundingRectangles()
+#         if not rects:
+#             return None
+#         lefts = [r.left for r in rects]
+#         tops = [r.top for r in rects]
+#         rights = [r.right for r in rects]
+#         bottoms = [r.bottom for r in rects]
+#         return (min(lefts), min(tops), max(rights), max(bottoms))
+#     except Exception as e:
+#         return None
 
 
 class HighlightBox:
@@ -247,40 +271,65 @@ highlight_box = HighlightBox(overlay.root)
 
 
 # ---------------------------------------------------------------------------
-# TTS
+# TTS — two swappable backends behind one entry point (speak_text)
 # `current_engine` holds a reference to whichever pyttsx3 engine instance is
-# actively speaking, so a second hotkey press (firing on a different thread)
-# can reach in and call .stop() on that SAME engine object mid-speech.
+# actively speaking (local mode only), so a second hotkey press (firing on a
+# different thread) can reach in and call .stop() on that SAME engine object
+# mid-speech. Cloud mode is stopped differently — see stop_current_speech().
 # ---------------------------------------------------------------------------
 current_engine = None
+stop_event = threading.Event()   # signals ANY backend's playback loop to stop early
+
+
+def stop_current_speech():
+    """Stop whichever backend is currently talking. Called when the hotkey
+    fires a second time while is_speaking is True."""
+    stop_event.set()
+    if config['engine'] == 'openrouter':
+        pygame.mixer.music.stop()
+    elif current_engine is not None:
+        current_engine.stop()
 
 
 def speak_text(text: str) -> None:
-    global current_engine
+    stop_event.clear()
 
     # Normalize line endings so line-splitting and character offsets line up
-    # with exactly what SAPI is speaking — mixed \r\n vs \n would otherwise
-    # throw the offset-to-line mapping off.
+    # with exactly what gets spoken — mixed \r\n vs \n would otherwise throw
+    # the offset-to-line mapping off.
     text = text.replace('\r\n', '\n').replace('\r', '\n')
     lines = text.split('\n')
 
     # Precompute each line's (start, end) character offset in the full
-    # string, so that when SAPI reports "currently at character X", we can
-    # look up which line that falls inside.
+    # string, so that when we're told "currently at character X" (either
+    # from SAPI5 in real time, or from our own timing estimate), we can look
+    # up which line that falls inside.
     line_offsets = []
     cursor = 0
     for line in lines:
         line_offsets.append((cursor, cursor + len(line)))
         cursor += len(line) + 1   # +1 accounts for the '\n' we split on
 
+    overlay.load_lines(lines)
+    overlay.show()
+
+    if config['engine'] == 'openrouter':
+        speak_openrouter(text, lines, line_offsets)
+    else:
+        speak_local(text, lines, line_offsets)
+
+
+def speak_local(text, lines, line_offsets):
+    """Offline TTS via pyttsx3 (Windows SAPI5). Gets real per-word timing
+    callbacks from the engine itself, so the line highlight is genuinely
+    audio-synced, not estimated."""
+    global current_engine
+
     def offset_to_line(offset):
         for i, (start, end) in enumerate(line_offsets):
             if start <= offset <= end:
                 return i
         return len(lines) - 1
-
-    overlay.load_lines(lines)
-    overlay.show()
 
     last_line = {'index': -1}
 
@@ -305,6 +354,98 @@ def speak_text(text: str) -> None:
         current_engine = None
 
 
+def speak_openrouter(text, lines, line_offsets):
+    """Cloud TTS via OpenRouter's Deepgram Flux TTS (free) model — fetched
+    and played ONE LINE AT A TIME instead of one big request for the whole
+    selection. This gets audio playing much sooner (the first request is
+    just one line, not the whole selection), and it makes the line
+    highlighting genuinely accurate instead of a timing estimate, since
+    each audio clip corresponds to exactly one line. While one line plays,
+    the NEXT line's audio is already being fetched in the background, so
+    there's no dead air waiting between lines."""
+    api_key = config.get('openrouter_api_key', '').strip()
+    if not api_key:
+        overlay.set_status("No OpenRouter API key set — edit config.json")
+        overlay.hide_after(2500)
+        return
+
+    def fetch_line_audio(line_text):
+        if not line_text.strip():
+            return None
+        try:
+            response = requests.post(
+                "https://openrouter.ai/api/v1/audio/speech",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "deepgram/flux-tts:free",
+                    "input": line_text,
+                    "voice": config.get('openrouter_voice', 'flux-haley-en'),
+                    "response_format": "mp3",
+                },
+                timeout=30,
+            )
+            response.raise_for_status()
+            return response.content
+        except requests.RequestException as e:
+            return None
+
+    overlay.set_status("Generating audio...")
+
+    # Fetch the FIRST line synchronously (we need something to play right
+    # away); every later line is prefetched on a background thread while
+    # the previous line is still playing.
+    next_audio = {'data': fetch_line_audio(lines[0]) if lines else None}
+    fetch_lock = threading.Lock()
+
+    def prefetch(index):
+        if index < len(lines):
+            data = fetch_line_audio(lines[index])
+            with fetch_lock:
+                next_audio['data'] = data
+
+    for i, line in enumerate(lines):
+        if stop_event.is_set():
+            break
+
+        with fetch_lock:
+            audio_data = next_audio['data']
+            next_audio['data'] = None
+
+        # Start fetching the NEXT line now, in parallel with this line's
+        # playback, so it's ready the moment this one finishes.
+        prefetch_thread = threading.Thread(target=prefetch, args=(i + 1,), daemon=True)
+        prefetch_thread.start()
+
+        if audio_data is not None:
+            overlay.highlight_line(i)
+            overlay.set_status("Speaking")
+
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+                f.write(audio_data)
+                temp_path = f.name
+
+            pygame.mixer.music.load(temp_path)
+            pygame.mixer.music.play()
+            while pygame.mixer.music.get_busy():
+                if stop_event.is_set():
+                    pygame.mixer.music.stop()
+                    break
+                time.sleep(0.05)
+
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+        prefetch_thread.join()   # make sure the next line's fetch has landed before looping
+
+        if stop_event.is_set():
+            break
+
+
 is_speaking = False
 
 
@@ -325,12 +466,11 @@ def wait_for_clipboard_change(original: str, timeout: float = 3.0, poll_interval
 
 
 def read_selected_text():
-    global is_speaking, current_engine
+    global is_speaking
 
     # Second press WHILE speaking -> interrupt instead of starting fresh.
     if is_speaking:
-        if current_engine is not None:
-            current_engine.stop()
+        stop_current_speech()
         overlay.set_status("Stopped")
         overlay.hide_after(800)
         is_speaking = False
